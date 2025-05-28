@@ -10,15 +10,15 @@ import time
 from urllib.parse import urlparse
 
 # Cuckoo3 API configuration
-CUCKOO_API_BASE_URL = "http://localhost:8090"  # Base URL
-CUCKOO_API_KEY = "35e55a69d7dfad1dea685ebceb54b9fa2bd185e9"  # Key hiện tại
+CUCKOO_API_BASE_URL = "http://localhost:8090"  
+CUCKOO_API_KEY = "35e55a69d7dfad1dea685ebceb54b9fa2bd185e9"  
 CUCKOO_HEADERS = {"Authorization": f"Token {CUCKOO_API_KEY}"}
 
 # Gmail configuration
 IMAP_SERVER = "imap.gmail.com"
-EMAIL_ADDRESS = "doanv4869@gmail.com"  # Thay bằng email thực tế của bạn
-EMAIL_PASSWORD = "Doan01012003@#$"  # Thay bằng mật khẩu Gmail của bạn
-CHECK_INTERVAL = 60                    # Seconds between checks
+EMAIL_ADDRESS = "doanv4869@gmail.com"  
+EMAIL_PASSWORD = "Doan01012003@#$"  
+CHECK_INTERVAL = 60                    
 
 # Directory to save attachments
 ATTACHMENT_DIR = "/tmp/cuckoo_attachments"
