@@ -1,179 +1,187 @@
-import imaplib
-import email
-from email.header import decode_header
 import os
+import base64
 import requests
-import magic
-import json
-import re
+import mimetypes
 import time
-from urllib.parse import urlparse
+import re
+import json
+from email import message_from_bytes
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from requests.auth import HTTPBasicAuth
 
-# Cuckoo3 API configuration
-CUCKOO_API_BASE_URL = "http://localhost:8090"  
-CUCKOO_API_KEY = "35e55a69d7dfad1dea685ebceb54b9fa2bd185e9"  
+# Define scopes for reading and modifying Gmail
+SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+
+# Cuckoo API URL and authentication details
+CUCKOO_API = 'http://localhost:8090'
+CUCKOO_API_KEY = "35e55a69d7dfad1dea685ebceb54b9fa2bd185e9"
 CUCKOO_HEADERS = {"Authorization": f"Token {CUCKOO_API_KEY}"}
 
-# Gmail configuration
-IMAP_SERVER = "imap.gmail.com"
-EMAIL_ADDRESS = "doanv4869@gmail.com"  
-EMAIL_PASSWORD = "Doan01012003@#$"  
-CHECK_INTERVAL = 60                    
+# Regex pattern to find URLs
+URL_REGEX = r'https?://[^\s)>\"]+'
 
-# Directory to save attachments
-ATTACHMENT_DIR = "/tmp/cuckoo_attachments"
-if not os.path.exists(ATTACHMENT_DIR):
-    os.makedirs(ATTACHMENT_DIR)
+# Load or refresh Gmail API access token
+def get_gmail_service():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    return build('gmail', 'v1', credentials=creds)
 
-def connect_to_email():
-    """Connect to Gmail via IMAP."""
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-    mail.select("inbox")
-    return mail
-
-def extract_urls(text):
-    """Extract URLs from email body."""
-    url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-    return re.findall(url_pattern, text)
-
-def submit_to_cuckoo(file_path=None, url=None):
-    """Submit a file or URL to Cuckoo3 for analysis."""
+# Submit a file to Cuckoo with error handling
+def submit_file(file_path):
     try:
-        # Default settings for analysis
-        settings = {
-            "platforms": [{"platform": "windows", "os_version": "10"}],
-            "timeout": 120
-        }
-        
-        if file_path:
-            with open(file_path, "rb") as f:
-                files = {"file": (os.path.basename(file_path), f)}
-                data = {"settings": json.dumps(settings)}
-                response = requests.post(
-                    f"{CUCKOO_API_BASE_URL}/submit/file",
-                    headers=CUCKOO_HEADERS,
-                    files=files,
-                    data=data
-                )
-        elif url:
+        with open(file_path, 'rb') as f:
+            files = {'file': (os.path.basename(file_path), f)}
             data = {
-                "url": url,
-                "settings": json.dumps(settings)
+                "settings": json.dumps({
+                    "platforms": [{"platform": "windows", "os_version": "10"}],
+                    "timeout": 120
+                })
             }
             response = requests.post(
-                f"{CUCKOO_API_BASE_URL}/submit/url",
+                f"{CUCKOO_API}/submit/file",
                 headers=CUCKOO_HEADERS,
+                files=files,
                 data=data
             )
-        else:
-            return None
-
-        if response.status_code == 200 or response.status_code == 201:
-            return response.json().get("analysis_id")
-        else:
-            print(f"Failed to submit to Cuckoo3: {response.text}")
-            return None
-    except Exception as e:
-        print(f"Error submitting to Cuckoo3: {e}")
+            response.raise_for_status()
+            return response.json().get('analysis_id')
+    except requests.RequestException as e:
+        print(f"Error submitting file to Cuckoo: {e}")
         return None
 
-def get_task_report(analysis_id):
-    """Retrieve analysis report from Cuckoo3."""
-    while True:
-        try:
-            response = requests.get(
-                f"{CUCKOO_API_BASE_URL}/analyses/{analysis_id}/",
-                headers=CUCKOO_HEADERS
-            )
-            if response.status_code == 200:
-                report = response.json()
-                if report.get("state") in ["completed", "failed", "finished"]:
-                    return report
-            time.sleep(10)
-        except Exception as e:
-            print(f"Error retrieving report: {e}")
-            time.sleep(10)
-
-def process_email(mail):
-    """Process new emails and extract attachments/URLs."""
+# Submit a URL to Cuckoo with error handling
+def submit_url(url):
     try:
-        _, msg_ids = mail.search(None, "UNSEEN")
-        for msg_id in msg_ids[0].split():
-            _, msg_data = mail.fetch(msg_id, "(RFC822)")
-            email_body = msg_data[0][1]
-            msg = email.message_from_bytes(email_body)
+        data = {
+            "url": url,
+            "settings": json.dumps({
+                "platforms": [{"platform": "windows", "os_version": "10"}],
+                "timeout": 120
+            })
+        }
+        response = requests.post(
+            f"{CUCKOO_API}/submit/url",
+            headers=CUCKOO_HEADERS,
+            data=data
+        )
+        response.raise_for_status()
+        return response.json().get('analysis_id')
+    except requests.RequestException as e:
+        print(f"Error submitting URL to Cuckoo: {e}")
+        return None
 
-            # Decode email subject
-            subject, encoding = decode_header(msg["subject"])[0]
-            if isinstance(subject, bytes):
-                subject = subject.decode(encoding or "utf-8")
-            print(f"Processing email: {subject}")
-
-            # Extract URLs from email body
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        try:
-                            body = part.get_payload(decode=True).decode()
-                            break
-                        except:
-                            continue
-            else:
-                try:
-                    body = msg.get_payload(decode=True).decode()
-                except:
-                    pass
-
-            urls = extract_urls(body)
-            for url in urls:
-                print(f"Found URL: {url}")
-                analysis_id = submit_to_cuckoo(url=url)
-                if analysis_id:
-                    report = get_task_report(analysis_id)
-                    print(f"URL Analysis Report: {report}")
-
-            # Extract attachments
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_maintype() == "multipart":
-                        continue
-                    if part.get("Content-Disposition") is None:
-                        continue
-
-                    filename = part.get_filename()
-                    if filename:
-                        filename, encoding = decode_header(filename)[0]
-                        if isinstance(filename, bytes):
-                            filename = filename.decode(encoding or "utf-8")
-
-                        # Save attachment
-                        file_path = os.path.join(ATTACHMENT_DIR, filename)
-                        with open(file_path, "wb") as f:
-                            f.write(part.get_payload(decode=True))
-
-                        # Verify file type
-                        mime_type = magic.from_file(file_path, mime=True)
-                        if mime_type in ["application/octet-stream", "application/x-msdownload", "application/pdf"]:
-                            print(f"Submitting attachment: {filename}")
-                            analysis_id = submit_to_cuckoo(file_path=file_path)
-                            if analysis_id:
-                                report = get_task_report(analysis_id)
-                                print(f"File Analysis Report: {report}")
-    except Exception as e:
-        print(f"Error processing email: {e}")
-
-def main():
-    """Main loop to monitor Gmail."""
-    while True:
+# Retrieve Cuckoo report with timeout
+def get_report(analysis_id):
+    url = f"{CUCKOO_API}/analyses/{analysis_id}/"
+    max_attempts = 20  # Max 200 seconds
+    for _ in range(max_attempts):
         try:
-            mail = connect_to_email()
-            process_email(mail)
-            mail.logout()
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-        time.sleep(CHECK_INTERVAL)
+            response = requests.get(url, headers=CUCKOO_HEADERS)
+            response.raise_for_status()
+            report = response.json()
+            if report.get('state') in ['completed', 'failed', 'finished']:
+                return report
+        except requests.RequestException as e:
+            print(f"Error retrieving report: {e}")
+        time.sleep(10)
+    print(f"Timeout waiting for report for analysis {analysis_id}")
+    return None
 
-if __name__ == "__main__":
-    main()
+# Extract simple IOCs from the report
+def extract_iocs(report):
+    if not report or 'network' not in report:
+        print("[-] No IOCs found or invalid report.")
+        return
+    print("[+] Extracted IOCs:")
+    for domain in report["network"].get("domains", []):
+        print(" - Domain:", domain.get("domain"))
+    for host in report["network"].get("hosts", []):
+        print(" - IP:", host.get("ip"))
+    for http in report["network"].get("http", []):
+        print(" - URL:", http.get("uri"))
+
+# Process an email and clean up temporary files
+def process_email(service, msg_id):
+    try:
+        msg = service.users().messages().get(userId='me', id=msg_id, format='raw').execute()
+        msg_bytes = base64.urlsafe_b64decode(msg['raw'].encode() if isinstance(msg['raw'], str) else msg['raw'])
+        mime_msg = message_from_bytes(msg_bytes)
+
+        urls = []
+        attachments = []
+
+        for part in mime_msg.walk():
+            content_type = part.get_content_type()
+            if part.get_filename():  # Attachment found
+                filename = part.get_filename()
+                data = part.get_payload(decode=True)
+                filepath = os.path.join("tmp", filename)
+                os.makedirs("tmp", exist_ok=True)
+                with open(filepath, "wb") as f:
+                    f.write(data)
+                print(f"[+] Saved attachment: {filename}")
+                attachments.append(filepath)
+            elif content_type == 'text/plain':
+                text = part.get_payload(decode=True).decode(errors='ignore')
+                urls += re.findall(URL_REGEX, text)
+
+        # Submit URLs to Cuckoo
+        for url in urls:
+            print(f"[+] Submitting URL to Cuckoo: {url}")
+            task_id = submit_url(url)
+            if task_id:
+                print(f"    → Task ID: {task_id}")
+                report = get_report(task_id)
+                extract_iocs(report)
+
+        # Submit files to Cuckoo
+        for filepath in attachments:
+            print(f"[+] Submitting file to Cuckoo: {filepath}")
+            task_id = submit_file(filepath)
+            if task_id:
+                print(f"    → Task ID: {task_id}")
+                report = get_report(task_id)
+                extract_iocs(report)
+
+        # Clean up temporary files
+        for filepath in attachments:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                print(f"[-] Removed temporary file: {filepath}")
+
+    except HttpError as e:
+        print(f"Error processing email {msg_id}: {e}")
+    except Exception as e:
+        print(f"Unexpected error processing email {msg_id}: {e}")
+
+# Main execution
+if __name__ == '__main__':
+    try:
+        service = get_gmail_service()
+        # Fetch unread emails
+        results = service.users().messages().list(userId='me', q='is:unread', maxResults=5).execute()
+        messages = results.get('messages', [])
+
+        if not messages:
+            print("No unread emails found.")
+        else:
+            for msg in messages:
+                print(f"\n[>] Processing email ID: {msg['id']}")
+                process_email(service, msg['id'])
+                # Mark email as read
+                service.users().messages().modify(userId='me', id=msg['id'], body={'removeLabelIds': ['UNREAD']}).execute()
+                print(f"[-] Email ID {msg['id']} marked as read.")
+    except Exception as e:
+        print(f"Error in main loop: {e}")
